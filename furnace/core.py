@@ -1,7 +1,8 @@
 import os
 import pickle
-import bcolz
+from itertools import chain
 
+import bcolz
 import numpy as np
 
 import torch
@@ -36,6 +37,13 @@ def create_variable(x, volatile, requires_grad=False):
         x = Variable(x, volatile=volatile, requires_grad=requires_grad)
     return x
 
+def to_variable_(x, requires_grad=False):
+    return create_variable(x, False, requires_grad=requires_grad)
+
+def to_variable(x, requires_grad=False):
+    return [to_variable_(v, requires_grad) for v in x] if isinstance(x, list) \
+        else to_variable_(x, requires_grad)
+
 USE_GPU = True
 def to_gpu(x, *args, **kwargs):
     return x.cuda(*args, **kwargs) if torch.cuda.is_available() and USE_GPU else x
@@ -65,8 +73,32 @@ def num_cpus():
     except AttributeError:
         return os.cpu_count()
 
+def trainable_params_(model):
+    return [p for p in model.parameters() if p.requires_grad]
+
+def chain_params(params):
+    if isinstance(params, (list, tuple)):
+        return list(chain(*[trainable_params_(o) for o in params]))
+    return trainable_params_(params)
+
 def children(model):
     return model if isinstance(model, (list, tuple)) else list(model.children())
+
+def apply_leaf(model, function):
+    c = children(model)
+    if isinstance(model, nn.Module):
+        function(model)
+    if len(c) > 0:
+        for layer in c:
+            apply_leaf(layer, function)
+
+def set_trainable_attr(model, trainable):
+    model.trainable = trainable
+    for param in model.parameters():
+        param.requires_grad = trainable
+
+def set_trainable(layer, trainable):
+    apply_leaf(layer, lambda model: set_trainable_attr(model, trainable))
 
 def save_model(model, path):
     torch.save(model.state_dict(), path)

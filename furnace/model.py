@@ -1,8 +1,10 @@
 import numpy as np
+import torch
 import torch.nn as nn
 
 from tqdm import tqdm, trange
-from .core import apply_leaf, trainable_params_, to_variable
+from .core import apply_leaf, trainable_params_, to_variable, \
+    to_volatile_variable, to_numpy
 
 def cut_model(model, cut):
     return list(model.children())[:cut] if cut else [model]
@@ -11,8 +13,8 @@ def set_train_mode(model):
     if (hasattr(model, "running_mean") and (getattr(model, "bn_freeze", False)
             or not getattr(model, "trainable", False))):
         model.eval()
-    elif (getattr(m,'drop_freeze',False) and hasattr(m, 'p')
-            and ('drop' in type(m).__name__.lower())):
+    elif (getattr(model,'drop_freeze',False) and hasattr(model, 'p')
+            and ('drop' in type(model).__name__.lower())):
         model.eval()
     else:
         model.train()
@@ -127,7 +129,63 @@ def validate(stepper, dataloader, metrics):
     loss,res = [],[]
     stepper.reset(False)
     for (*x, y) in iter(dataloader):
-        preds,l = stepper.evaluate(VV(x), VV(y))
-        loss.append(to_np(l))
+        preds,l = stepper.evaluate(to_volatile_variable(x), to_volatile_variable(y))
+        loss.append(to_numpy(l))
         res.append([f(preds.data,y) for f in metrics])
     return [np.mean(loss)] + list(np.mean(np.stack(res),0))
+
+def get_prediction(x):
+    if isinstance(x, (tuple, list)):
+        x = x[0]
+    return x.data
+
+def predict(model, dataloader):
+    return predict_with_targs(model, dataloader)[0]
+
+def predict_with_targs(model, dataloader):
+    model.eval()
+    if hasattr(model, "reset"):
+        model.reset()
+    res = []
+    for *x, y in iter(dataloader):
+        res.append([get_prediction(model(*to_volatile_variable(x))), y])
+    pred, target = zip(*res)
+    return to_numpy(torch.cat(pred)), to_numpy(torch.cat(target))
+
+def model_summary(m, input_size):
+    def register_hook(module):
+        def hook(module, input, output):
+            class_name = str(module.__class__).split('.')[-1].split("'")[0]
+            module_idx = len(summary)
+
+            m_key = '%s-%i' % (class_name, module_idx+1)
+            summary[m_key] = OrderedDict()
+            summary[m_key]['input_shape'] = list(input[0].size())
+            summary[m_key]['input_shape'][0] = -1
+            summary[m_key]['output_shape'] = list(output.size())
+            summary[m_key]['output_shape'][0] = -1
+
+            params = 0
+            if hasattr(module, 'weight'):
+                params += torch.prod(torch.LongTensor(list(module.weight.size())))
+                summary[m_key]['trainable'] = module.weight.requires_grad
+            if hasattr(module, 'bias') and module.bias is not None:
+                params +=  torch.prod(torch.LongTensor(list(module.bias.size())))
+            summary[m_key]['nb_params'] = params
+
+        if (not isinstance(module, nn.Sequential) and
+           not isinstance(module, nn.ModuleList) and
+           not (module == m)):
+            hooks.append(module.register_forward_hook(hook))
+
+    summary = OrderedDict()
+    hooks = []
+    m.apply(register_hook)
+
+    if isinstance(input_size[0], (list, tuple)):
+        x = [to_gpu(Variable(torch.rand(1,*in_size))) for in_size in input_size]
+    else: x = [to_gpu(Variable(torch.rand(1,*input_size)))]
+    m(*x)
+
+    for h in hooks: h.remove()
+    return summary

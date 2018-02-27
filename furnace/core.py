@@ -44,6 +44,13 @@ def to_variable(x, requires_grad=False):
     return [to_variable_(v, requires_grad) for v in x] if isinstance(x, list) \
         else to_variable_(x, requires_grad)
 
+def to_volatile_variable_(x):
+    return create_variable(x, True)
+
+def to_volatile_variable(x):
+    return [to_volatile_variable_(o) for o in x] if isinstance(x, list) \
+        else to_volatile_variable_(x)
+
 USE_GPU = True
 def to_gpu(x, *args, **kwargs):
     return x.cuda(*args, **kwargs) if torch.cuda.is_available() and USE_GPU else x
